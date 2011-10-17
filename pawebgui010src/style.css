@@ -1,0 +1,193 @@
+body {
+  margin-left: 3em;
+  margin-right: 3em;
+  margin-top: 3em;
+  margin-bottom: 1em;
+  background-color: #E0E0FF;
+  color: #000000;
+}
+
+a:link    {color: #0000E0; text-decoration: none;}
+a:visited {color: #0000E0; text-decoration: none;}
+a:active  {color: #0000E0; text-decoration: none;}
+a:hover   {color: #6060FF; text-decoration: none;}
+
+p.maintitle {
+  text-align: center;
+  font-size: 1.5em;
+  font-weight: bold;
+  margin-bottom: 3em;
+}
+
+p.footertext {
+  margin: 0 0 0 0;
+  text-align: left;
+  font-size: 0.85em;
+  color: #606060;
+}
+
+p.sysinfoHeader {
+  margin: 1em auto 0.25em auto;
+  text-align: left;
+  width: 70%;
+}
+
+p.sysinfo {
+  margin: 0 auto 1em auto;
+  border-width: 1px 1px 1px 1px;
+  border-color: black black black black;
+  border-style: solid solid solid solid;
+  font-size: 0.95em;
+  font-family: monospace;
+  text-align: left;
+  width: 70%;
+  padding: 0.25em 0.4em 0.25em 0.4em;
+}
+
+p.SinkItemsWrapper {
+  margin: 0 0 0 0;
+}
+
+a.OutSinkItem {
+  margin: 0 0 0 0;
+}
+
+a.OutSinkActiveItem {
+  margin: 0 0 0 0;
+  font-weight: bold;
+}
+
+span.ownerspan {
+  font-size: 0.8em;
+  color: #707070;
+}
+
+table.tabtable {
+  margin: 0 auto 0 auto;
+  border-width: 0.1em;
+  border-spacing: 0;
+  border-style: solid solid solid solid;
+  border-color: #000000;
+  text-align: center;
+  background-color: #D8D8EF;
+}
+
+table.tabtable td {
+  border-width: 0;
+  padding: 0.1em 0.8em 0.1em 0.8em;
+}
+
+td.activetab {
+  background-color: #E8E8FF;
+}
+
+td.tdSink {
+  text-align: left;
+  vertical-align: middle;
+}
+
+td.tdDefSink {
+  text-align: left;
+  vertical-align: middle;
+  font-weight: bold;
+  color: #101050;
+}
+
+table.contenttable {
+  border-width: 0.1em 0.1em 0.1em 0.1em;
+  border-spacing: 0.2em;
+  border-style: solid solid solid solid;
+  border-color: black black black black;
+  border-collapse: separate;
+  margin: 1em 0 0 0;
+  width: 100%;
+  text-align: justify;
+}
+
+table.contenttable td {
+  border-width: 0.1em 0.1em 0.1em 0.1em;
+  padding: 0.4em 0.4em 0.4em 0.4em;
+  border-style: solid solid solid solid;
+  border-color: gray gray gray gray;
+}
+
+table.contenttable th {
+  border-width: 0.1em 0.1em 0.1em 0.1em;
+  padding: 0.4em 0.4em 0.4em 0.4em;
+  border-style: solid solid solid solid;
+  border-color: black black black black;
+}
+
+td.tdApp {
+  text-align: left;
+  vertical-align: middle;
+}
+
+td.tdMute {
+  text-align: center;
+  vertical-align: middle;
+}
+
+td.tdOut {
+  text-align: center;
+  vertical-align: middle;
+}
+
+img.muted {
+  border: 0;
+}
+
+img.unmuted {
+  border: 0;
+}
+
+img.AppIcon {
+  border: 0;
+  margin: -0.3em 0.4em -0.3em -0.1em;
+  vertical-align: middle;
+  float: left;
+  height: 48px;
+  width: 48px;
+}
+
+img.CardIcon {
+  border: 0;
+  margin: -0.3em 0.4em -0.3em -0.1em;
+  vertical-align: middle;
+  float: left;
+  height: 48px;
+  width: 48px;
+}
+
+img.vol1 {
+  border: 0;
+  vertical-align: middle;
+  background: #C5C171;
+}
+
+img.vol2 {
+  border: 0;
+  vertical-align: middle;
+  background: #EFF085;
+}
+
+img.vol1:hover {
+  border: 0;
+  background: #0000A0;
+}
+
+img.vol2:hover {
+  border: 0;
+  background: #0000A0;
+}
+
+td.tdVol {
+  text-align: left;
+  font-size: 0.95em;
+  vertical-align: middle;
+}
+
+hr.footerdelimiter {
+  width: 100%;
+  margin: 1em 0 0 0;
+}
