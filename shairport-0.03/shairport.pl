@@ -11,6 +11,9 @@ my $apname = "ShairPort $$ on " . `hostname`;
 #  my $password = '';
 my $password = '';
 
+# Find free port
+my $port = get_next_free_local_port(5000);
+
 # that's all!
 
 #   ShairPort - Airtunes compatible server
@@ -46,6 +49,7 @@ use Crypt::OpenSSL::RSA;
 use Digest::MD5 qw/md5_hex/;
 use POSIX ":sys_wait_h";
 eval "use IO::Socket::INET6;";
+use FreePort;
 
 chomp $apname;
 
@@ -63,7 +67,7 @@ if ($avahi_publish==0) {
     exec 'avahi-publish-service',
         join('', map { sprintf "%02X", $_ } @hw_addr) . "\@$apname",
         "_raop._tcp",
-        "5000",
+        $port,
         "tp=UDP","sm=false","sv=false","ek=1","et=0,1","cn=0,1","ch=2","ss=16","sr=44100","pw=false","vn=3","txtvers=1";
 }        
 
@@ -92,7 +96,7 @@ my $listen;
     eval {
             $listen = new IO::Socket::INET6(Listen => 1,
                             Domain => AF_INET6,
-                            LocalPort => 5000,
+                            LocalPort => $port,
                             ReuseAddr => 1,
                             Proto => 'tcp');
     };
@@ -103,7 +107,7 @@ my $listen;
                   "**************************************\n\n";
 
             $listen = new IO::Socket::INET(Listen => 1,
-                            LocalPort => 5000,
+                            LocalPort => $port,
                             ReuseAddr => 1,
                             Proto => 'tcp');
     }
