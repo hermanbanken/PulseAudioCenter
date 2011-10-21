@@ -1,18 +1,18 @@
 #!/usr/bin/perl
 
+# Find free port
+my $port = get_next_free_local_port(5000);
+
 # Configure the following two options:
 # AP name - as will be shown in iTunes' menu
 # example:
 #  my $apname = "SteePort";
-my $apname = "ShairPort $$ on " . `hostname`;
+my $apname = "ShairPort(" . $port . ")";
 
 # password - required to connect
 # for no password, set:
 #  my $password = '';
-my $password = '';
-
-# Find free port
-my $port = get_next_free_local_port(5000);
+my $password = 'test';
 
 # that's all!
 
