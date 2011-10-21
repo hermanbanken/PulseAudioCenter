@@ -1,0 +1,29 @@
+.bar {
+	border: 1px solid #333;
+	
+	display: -webkit-box;
+	-webkit-box-orient: horizontal;
+	-webkit-box-pack: justify;
+	-webkit-box-align: center;
+}
+
+.bar sink {
+	position: relative;
+	display: block;
+	background: red;
+	border: 1px solid;
+	box-flex: 1;
+}
+
+.bar sink h2 {
+	text-align: center;
+}
+
+canvas.bar {
+	width: 100%;
+	height: 150px;
+}
+
+.bar sink {
+	
+}

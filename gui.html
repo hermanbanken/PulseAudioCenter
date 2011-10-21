@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>PulseAudioCenter</title>
+		<link href="gui.css" rel="stylesheet" type="text/css" />
+		<script src="underscore-min.js"></script>
+		<script src="jquery-1.6.4.min.js"></script>
+		<script src="pulse.js"></script>
+	</head>
+	<body>
+		<script id='template-sink' type='text/x-backbone-template'>
+			<sink class='sink' id='<%= index %>'>
+				<h2><%= name %></h2>
+				<input type='range' min='0' max='100' value='<%= volume %>' />
+				<description>Description</description>
+			</sink>
+		</script>
+		<script id='template-sink-input' type='text/x-backbone-template'>
+			<sink class='sink-input' id='<%= index %>'>
+				<h2><%= name %></h2>
+				<input type='range' min='0' max='100' value='<%= volume %>' />
+				<description>Description</description>
+			</sink>
+		</script>
+		
+		<div class='bar sink-inputs'></div>
+		<canvas class='bar sink-links'>You don't have a recent/decent browser, please use Chrome or Firefox 4+.</canvas>
+		<div class='bar sinks'></div>
+		<script>
+			var p = new Pulse('.sink-inputs', '.sink-links', '.sinks');
+		</script>
+	</body>
+</html>
