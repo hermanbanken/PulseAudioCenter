@@ -26,15 +26,22 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/select.h>
-#include <arpa/inet.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <pthread.h>
 #include <openssl/aes.h>
-#include <ao/ao.h>
 #include <math.h>
+#include <sys/stat.h>
+
+#include "hairtunes.h"
+#include <sys/signal.h>
+#include <fcntl.h>
+#include <ao/ao.h>
 
 #ifdef FANCY_RESAMPLING
 #include <samplerate.h>
@@ -45,9 +52,9 @@ int debug = 0;
 
 #include "alac.h"
 
-// default buffer - about half a second
-#define BUFFER_FRAMES   64
-#define START_FILL    55
+// and how full it needs to be to begin (must be <BUFFER_FRAMES)
+#define START_FILL    282
+
 #define MAX_PACKET      2048
 
 typedef unsigned short seq_t;
@@ -60,6 +67,17 @@ int dataport = 0, controlport = 0, timingport = 0;
 int fmtp[32];
 int sampling_rate;
 int frame_size;
+
+int buffer_start_fill = START_FILL;
+
+char *libao_driver = NULL;
+char *libao_devicename = NULL;
+char *libao_deviceid = NULL; // ao_options expects "char*"
+
+// FIFO name and file handle
+char *pipename = NULL;
+int pipe_handle = -1;
+
 #define FRAME_BYTES (4*frame_size)
 // maximal resampling shift - conservative
 #define OUTFRAME_BYTES (4*(frame_size+3))
@@ -72,8 +90,10 @@ int fancy_resampling = 1;
 SRC_STATE *src;
 #endif
 
-void rtp_request_resend(seq_t first, seq_t last);
+int  init_rtp(void);
 void init_buffer(void);
+int  init_output(void);
+void rtp_request_resend(seq_t first, seq_t last);
 void ab_resync(void);
 
 // interthread variables
@@ -121,7 +141,7 @@ int init_decoder(void) {
     int sample_size = fmtp[3];
     if (sample_size != 16)
         die("only 16-bit samples supported!");
-    
+
     alac = create_alac(sample_size, 2);
     if (!alac)
         return 1;
@@ -142,13 +162,86 @@ int init_decoder(void) {
     return 0;
 }
 
+int hairtunes_init(char *pAeskey, char *pAesiv, char *fmtpstr, int pCtrlPort, int pTimingPort,
+         int pDataPort, char *pRtpHost, char*pPipeName, char *pLibaoDriver, char *pLibaoDeviceName, char *pLibaoDeviceId)
+{
+    if(pAeskey != NULL)    
+        memcpy(aeskey, pAeskey, sizeof(aeskey));
+    if(pAesiv != NULL)
+        memcpy(aesiv, pAesiv, sizeof(aesiv));
+    if(pRtpHost != NULL)
+        rtphost = pRtpHost;
+    if(pPipeName != NULL)
+        pipename = pPipeName;
+    if(pLibaoDriver != NULL)
+        libao_driver = pLibaoDriver;
+    if(pLibaoDeviceName != NULL)
+        libao_devicename = pLibaoDeviceName;
+    if(pLibaoDeviceId != NULL)
+        libao_deviceid = pLibaoDeviceId;
+    
+    controlport = pCtrlPort;
+    timingport = pTimingPort;
+    dataport = pDataPort;
+
+    AES_set_decrypt_key(aeskey, 128, &aes);
+
+    memset(fmtp, 0, sizeof(fmtp));
+    int i = 0;
+    char *arg;
+    while ( (arg = strsep(&fmtpstr, " \t")) )
+        fmtp[i++] = atoi(arg);
+
+    init_decoder();
+    init_buffer();
+    init_rtp();      // open a UDP listen port and start a listener; decode into ring buffer
+    fflush(stdout);
+    init_output();              // resample and output from ring buffer
+
+    char line[128];
+    int in_line = 0;
+    int n;
+    double f;
+    while (fgets(line + in_line, sizeof(line) - in_line, stdin)) {
+        n = strlen(line);
+        if (line[n-1] != '\n') {
+            in_line = strlen(line) - 1;
+            if (n == sizeof(line)-1)
+                in_line = 0;
+            continue;
+        }
+        if (sscanf(line, "vol: %lf\n", &f)) {
+            assert(f<=0);
+            if (debug)
+                fprintf(stderr, "VOL: %lf\n", f);
+            volume = pow(10.0,0.05*f);
+            fix_volume = 65536.0 * volume;
+            continue;
+        }
+        if (!strcmp(line, "exit\n")) {
+            exit(0);
+        }
+        if (!strcmp(line, "flush\n")) {
+            pthread_mutex_lock(&ab_mutex);
+            ab_resync();
+            pthread_mutex_unlock(&ab_mutex);
+            if (debug)
+                fprintf(stderr, "FLUSH\n");
+        }
+    }
+    fprintf(stderr, "bye!\n");
+    fflush(stderr);
+
+    return EXIT_SUCCESS;
+}
+
+#ifdef HAIRTUNES_STANDALONE
 int main(int argc, char **argv) {
     char *hexaeskey = 0, *hexaesiv = 0;
     char *fmtpstr = 0;
     char *arg;
-    int i;
     assert(RAND_MAX >= 0x10000);    // XXX move this to compile time
-    while (arg = *++argv) {
+    while ( (arg = *++argv) ) {
         if (!strcasecmp(arg, "iv")) {
             hexaesiv = *++argv;
             argc--;
@@ -171,6 +264,34 @@ int main(int argc, char **argv) {
         } else
         if (!strcasecmp(arg, "host")) {
             rtphost = *++argv;
+        } else
+        if (!strcasecmp(arg, "pipe")) {
+            if (libao_driver || libao_devicename || libao_deviceid ) {
+                die("Option 'pipe' may not be combined with 'ao_driver', 'ao_devicename' or 'ao_deviceid'");
+            }
+
+            pipename = *++argv;
+        } else
+        if (!strcasecmp(arg, "ao_driver")) {
+            if (pipename) {
+                die("Option 'ao_driver' may not be combined with 'pipe'");
+            }
+
+            libao_driver = *++argv;
+        } else
+        if (!strcasecmp(arg, "ao_devicename")) {
+            if (pipename || libao_deviceid ) {
+                die("Option 'ao_devicename' may not be combined with 'pipe' or 'ao_deviceid'");
+            }
+
+            libao_devicename = *++argv;
+        } else
+        if (!strcasecmp(arg, "ao_deviceid")) {
+            if (pipename || libao_devicename) {
+                die("Option 'ao_deviceid' may not be combined with 'pipe' or 'ao_devicename'");
+            }
+
+            libao_deviceid = *++argv;
         }
 #ifdef FANCY_RESAMPLING
         else
@@ -187,53 +308,10 @@ int main(int argc, char **argv) {
         die("can't understand IV");
     if (hex2bin(aeskey, hexaeskey))
         die("can't understand key");
-    AES_set_decrypt_key(aeskey, 128, &aes);
-
-    memset(fmtp, 0, sizeof(fmtp));
-    i = 0;
-    while (arg = strsep(&fmtpstr, " \t"))
-        fmtp[i++] = atoi(arg);
-
-    init_decoder();
-    init_buffer();
-    init_rtp();      // open a UDP listen port and start a listener; decode into ring buffer
-    fflush(stdout);
-    init_output();              // resample and output from ring buffer
-    
-    char line[128];
-    int in_line = 0;
-    int n;
-    double f;
-    while (fgets(line + in_line, sizeof(line) - in_line, stdin)) {
-        n = strlen(line);
-        if (line[n-1] != '\n') {
-            in_line = strlen(line) - 1;
-            if (n == sizeof(line)-1)
-                in_line = 0;
-            continue;
-        }
-        if (sscanf(line, "vol: %lf\n", &f)) {
-            assert(f<=0);
-            if (debug)
-                fprintf(stderr, "VOL: %lf\n", f);
-            volume = pow(10.0,0.1*f);
-            fix_volume = 65536.0 * volume;
-            continue;
-        }
-        if (!strcmp(line, "exit\n")) {
-            exit(0);
-        }
-        if (!strcmp(line, "flush\n")) {
-            pthread_mutex_lock(&ab_mutex);
-            ab_resync();
-            pthread_mutex_unlock(&ab_mutex);
-            if (debug)
-                fprintf(stderr, "FLUSH\n");
-        }
-    }
-    fprintf(stderr, "bye!\n");
-    fflush(stderr);
+    return hairtunes_init(NULL, NULL, fmtpstr, controlport, timingport, dataport,
+                    NULL, NULL, NULL, NULL, NULL);
 }
+#endif
 
 void init_buffer(void) {
     int i;
@@ -247,6 +325,7 @@ void ab_resync(void) {
     for (i=0; i<BUFFER_FRAMES; i++)
         audio_buffer[i].ready = 0;
     ab_synced = 0;
+    ab_buffering = 1;
 }
 
 // the sequence numbers will wrap pretty often.
@@ -257,14 +336,14 @@ static inline int seq_order(seq_t a, seq_t b) {
 }
 
 void alac_decode(short *dest, char *buf, int len) {
-    char packet[MAX_PACKET];
+    unsigned char packet[MAX_PACKET];
     assert(len<=MAX_PACKET);
 
-    char iv[16];
+    unsigned char iv[16];
     int i;
     memcpy(iv, aesiv, sizeof(iv));
     for (i=0; i+16<=len; i += 16)
-        AES_cbc_encrypt(buf+i, packet+i, 0x10, &aes, iv, AES_DECRYPT);
+        AES_cbc_encrypt((unsigned char*)buf+i, packet+i, 0x10, &aes, iv, AES_DECRYPT);
     if (len & 0xf)
         memcpy(packet+i, buf+i, len & 0xf);
 
@@ -306,14 +385,18 @@ void buffer_put_packet(seq_t seqno, char *data, int len) {
         abuf->ready = 1;
     }
 
-    if (ab_buffering && buf_fill >= START_FILL)
+    if (ab_buffering && buf_fill >= buffer_start_fill) {
+        ab_buffering = 0;
         pthread_cond_signal(&ab_buffer_ready);
+    }
     if (!ab_buffering) {
         // check if the t+10th packet has arrived... last-chance resend
         read = ab_read + 10;
         abuf = audio_buffer + BUFIDX(read);
-        if (!abuf->ready)
+        if (abuf->ready != 1) {
             rtp_request_resend(read, read);
+            abuf->ready = -1;
+        }
     }
 }
 
@@ -352,7 +435,7 @@ void *rtp_thread_func(void *arg) {
         if (plen < 0)
             continue;
         assert(plen<=MAX_PACKET);
-            
+
         type = packet[1] & ~0x80;
         if (type == 0x60 || type == 0x56) {   // audio data / resend
             pktp = packet;
@@ -364,6 +447,8 @@ void *rtp_thread_func(void *arg) {
             buffer_put_packet(seqno, pktp+12, plen-12);
         }
     }
+
+    return 0;
 }
 
 void rtp_request_resend(seq_t first, seq_t last) {
@@ -384,52 +469,74 @@ void rtp_request_resend(seq_t first, seq_t last) {
 #else
     rtp_client.sin_port = htons(controlport);
 #endif
-    sendto(rtp_sockets[1], req, sizeof(req), 0, (struct sockaddr *)&rtp_client, sizeof(struct sockaddr_in));
+    sendto(rtp_sockets[1], req, sizeof(req), 0, (struct sockaddr *)&rtp_client, sizeof(rtp_client));
 }
 
 
 int init_rtp(void) {
-#ifdef AF_INET6
-    struct sockaddr_in6 si;
-    int type = AF_INET6;
-    short *sin_port = &si.sin6_port;
-#else
     struct sockaddr_in si;
     int type = AF_INET;
-    short *sin_port = &si.sin_port;
-#endif
-    int sock, csock;    // data and control (we treat the streams the same here)
-
-    sock = socket(type, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock==-1)
-        die("Can't create socket!");
-
+	struct sockaddr* si_p = (struct sockaddr*)&si;
+	socklen_t si_len = sizeof(si);
+    unsigned short *sin_port = &si.sin_port;
     memset(&si, 0, sizeof(si));
 #ifdef AF_INET6
-    si.sin6_family = AF_INET6;
-    #ifdef SIN6_LEN
-        si.sin6_len = sizeof(si);
-    #endif
-    si.sin6_addr = in6addr_any;
-    si.sin6_flowinfo = 0;
-#else
-    si.sin_family = AF_INET;
-    si.sin_len = sizeof(si);
-    si.sin_addr.s_addr = htonl(INADDR_ANY);
+    struct sockaddr_in6 si6;
+    type = AF_INET6;
+	si_p = (struct sockaddr*)&si6;
+	si_len = sizeof(si6);
+    sin_port = &si6.sin6_port;
+    memset(&si6, 0, sizeof(si6));
 #endif
 
-    unsigned short port = 6000 - 3;
-    do {
-        port += 3;
-        *sin_port = htons(port);
-    } while (bind(sock, (struct sockaddr*)&si, sizeof(si))==-1);
+    si.sin_family = AF_INET;
+#ifdef SIN_LEN
+	si.sin_len = sizeof(si);
+#endif
+    si.sin_addr.s_addr = htonl(INADDR_ANY);
+#ifdef AF_INET6
+    si6.sin6_family = AF_INET6;
+    #ifdef SIN6_LEN
+        si6.sin6_len = sizeof(si);
+    #endif
+    si6.sin6_addr = in6addr_any;
+    si6.sin6_flowinfo = 0;
+#endif
 
-    csock = socket(type, SOCK_DGRAM, IPPROTO_UDP);
-    if (csock==-1)
-        die("Can't create socket!");
-    *sin_port = htons(port + 1);
-    if (bind(csock, (struct sockaddr*)&si, sizeof(si))==-1)
-        die("can't bind control socket");
+    int sock = -1, csock = -1;    // data and control (we treat the streams the same here)
+    unsigned short port = 6000;
+    while(1) {
+        if(sock < 0)
+            sock = socket(type, SOCK_DGRAM, IPPROTO_UDP);
+#ifdef AF_INET6
+	    if(sock==-1 && type == AF_INET6) {
+	        // try fallback to IPv4
+	        type = AF_INET;
+	        si_p = (struct sockaddr*)&si;
+	        si_len = sizeof(si);
+	        sin_port = &si.sin_port;
+	        continue;
+	    }
+#endif
+        if (sock==-1)
+            die("Can't create data socket!");
+
+        if(csock < 0)
+            csock = socket(type, SOCK_DGRAM, IPPROTO_UDP);
+        if (csock==-1)
+            die("Can't create control socket!");
+
+        *sin_port = htons(port);
+        int bind1 = bind(sock, si_p, si_len);
+        *sin_port = htons(port + 1);
+        int bind2 = bind(csock, si_p, si_len);
+
+        if(bind1 != -1 && bind2 != -1) break;
+        if(bind1 != -1) { close(sock); sock = -1; }
+        if(bind2 != -1) { close(csock); csock = -1; }
+
+        port += 3;
+    }
 
     printf("port: %d\n", port); // let our handler know where we end up listening
     printf("cport: %d\n", port+1);
@@ -485,14 +592,16 @@ static void biquad_lpf(biquad_t *bq, double freq, double Q) {
 
 static double biquad_filt(biquad_t *bq, double in) {
     double w = in - bq->a[0]*bq->hist[0] - bq->a[1]*bq->hist[1];
-    double out = bq->b[1]*bq->hist[0] + bq->b[2]*bq->hist[1] + bq->b[0]*w;
+    double out __attribute__((unused)) = bq->b[1]*bq->hist[0] + bq->b[2]*bq->hist[1] + bq->b[0]*w;
     bq->hist[1] = bq->hist[0];
     bq->hist[0] = w;
+
+    return w;
 }
 
 double bf_playback_rate = 1.0;
 
-static double bf_est_drift = 0.0;   // local clock is slower by 
+static double bf_est_drift = 0.0;   // local clock is slower by
 static biquad_t bf_drift_lpf;
 static double bf_est_err = 0.0, bf_last_err;
 static biquad_t bf_err_lpf, bf_err_deriv_lpf;
@@ -527,7 +636,7 @@ void bf_est_update(short fill) {
     if (debug)
         fprintf(stderr, "bf %d err %f drift %f desiring %f ed %f estd %f\r", fill, bf_est_err, bf_est_drift, desired_fill, err_deriv, err_deriv + CONTROL_A*bf_est_err);
     bf_playback_rate = 1.0 + CONTROL_A*bf_est_err + bf_est_drift;
-    
+
     bf_last_err = bf_est_err;
 }
 
@@ -537,9 +646,9 @@ short *buffer_get_frame(void) {
     seq_t read;
 
     pthread_mutex_lock(&ab_mutex);
-    
+
     buf_fill = ab_write - ab_read;
-    if (buf_fill < 1 || !ab_synced) {    // init or underrun. stop and wait
+    if (buf_fill < 1 || !ab_synced || ab_buffering) {    // init or underrun. stop and wait
         if (ab_synced)
             fprintf(stderr, "\nunderrun.\n");
 
@@ -564,7 +673,7 @@ short *buffer_get_frame(void) {
     bf_est_update(buf_fill);
 
     volatile abuf_t *curframe = audio_buffer + BUFIDX(read);
-    if (!curframe->ready) {
+    if (curframe->ready != 1) {
         fprintf(stderr, "\nmissing frame.\n");
         memset(curframe->data, 0, FRAME_BYTES);
     }
@@ -607,13 +716,15 @@ int stuff_buffer(double playback_rate, short *inptr, short *outptr) {
             *outptr++ = dithered_vol(*inptr++);
         }
     }
+
+    return frame_size + stuff;
 }
 
 void *audio_thread_func(void *arg) {
-    ao_device *dev = arg;
-    int i, play_samples;
+	ao_device* dev = arg;
+    int play_samples;
 
-    signed short buf_fill;
+    signed short buf_fill __attribute__((unused));
     signed short *inbuf, *outbuf;
     outbuf = malloc(OUTFRAME_BYTES);
 
@@ -623,7 +734,7 @@ void *audio_thread_func(void *arg) {
     if (fancy_resampling) {
         frame = malloc(frame_size*2*sizeof(float));
         outframe = malloc(2*frame_size*2*sizeof(float));
-        
+
         srcdat.data_in = frame;
         srcdat.data_out = outframe;
         srcdat.input_frames = FRAME_BYTES;
@@ -640,6 +751,7 @@ void *audio_thread_func(void *arg) {
 
 #ifdef FANCY_RESAMPLING
         if (fancy_resampling) {
+	        int i;
             for (i=0; i<2*FRAME_BYTES; i++) {
                 frame[i] = (float)inbuf[i] / 32768.0;
                 frame[i] *= volume;
@@ -651,28 +763,95 @@ void *audio_thread_func(void *arg) {
             play_samples = srcdat.output_frames_gen;
         } else
 #endif
+
             play_samples = stuff_buffer(bf_playback_rate, inbuf, outbuf);
 
-        ao_play(dev, (char *)outbuf, play_samples*4);
+        if (pipename) {
+            if (pipe_handle == -1) {
+                // attempt to open pipe - block if there are no readers
+                pipe_handle = open(pipename, O_WRONLY);
+            }
+
+            // only write if pipe open (there's a reader)
+            if (pipe_handle != -1) {
+                 if (write(pipe_handle, outbuf, play_samples*4) == -1) {
+                    // write failed - do anything here?
+                    // SIGPIPE is handled elsewhere...
+                 }
+            }
+        } else {
+            ao_play(dev, (char *)outbuf, play_samples*4);
+        }
     }
+
+    return 0;
 }
 
-int init_output(void) {
+#define NUM_CHANNELS 2
+
+void handle_broken_fifo() {
+    close(pipe_handle);
+    pipe_handle = -1;
+}
+
+void init_pipe(char* pipe) {
+    // make the FIFO and catch the broken pipe signal
+    mknod(pipe, S_IFIFO | 0644, 0);
+    signal(SIGPIPE, handle_broken_fifo);
+}
+
+void* init_ao() {
     ao_initialize();
-    int driver = ao_default_driver_id();
+
+    int driver;
+    if (libao_driver) {
+        // if a libao driver is specified on the command line, use that
+        driver = ao_driver_id(libao_driver);
+        if (driver == -1) {
+            die("Could not find requested ao driver");
+        }
+    } else {
+        // otherwise choose the default
+        driver = ao_default_driver_id();
+    }
 
     ao_sample_format fmt;
     memset(&fmt, 0, sizeof(fmt));
-
+	
     fmt.bits = 16;
     fmt.rate = sampling_rate;
-    fmt.channels = 2;
-    fmt.byte_format = AO_FMT_LITTLE;
-    
-    ao_device *dev = ao_open_live(driver, &fmt, 0);
+    fmt.channels = NUM_CHANNELS;
+    fmt.byte_format = AO_FMT_NATIVE;
+	
+    ao_option *ao_opts = NULL;
+    if(libao_deviceid) {
+        ao_append_option(&ao_opts, "id", libao_deviceid);
+    } else if(libao_devicename){
+        ao_append_option(&ao_opts, "dev", libao_devicename);
+        // Old libao versions (for example, 0.8.8) only support
+        // "dsp" instead of "dev".
+        ao_append_option(&ao_opts, "dsp", libao_devicename);
+    }
 
-    int err;
+    ao_device *dev = ao_open_live(driver, &fmt, ao_opts);
+    if (dev == NULL) {
+        die("Could not open ao device");
+    }
+
+    return dev;
+}
+
+int init_output(void) {
+	void* arg = 0;
+
+    if (pipename) {
+        init_pipe(pipename);
+    } else {
+        arg = init_ao();
+    }
+
 #ifdef FANCY_RESAMPLING
+    int err;
     if (fancy_resampling)
         src = src_new(SRC_SINC_MEDIUM_QUALITY, 2, &err);
     else
@@ -680,5 +859,8 @@ int init_output(void) {
 #endif
 
     pthread_t audio_thread;
-    pthread_create(&audio_thread, NULL, audio_thread_func, dev);
+    pthread_create(&audio_thread, NULL, audio_thread_func, arg);
+
+    return 0;
 }
+
