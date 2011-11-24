@@ -1,5 +1,7 @@
 <?php
 class PulseAudio {
+	// Auto start as system wide daemon:
+	// http://ubuntuforums.org/showthread.php?p=6869726#td_post_6869726
 	
 	public function __construct(){
 		// Void
